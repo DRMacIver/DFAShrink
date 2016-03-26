@@ -30,6 +30,7 @@ class Shrinker(object):
         self.__shrink_callback = shrink_callback or (lambda s: None)
         self.__add_end(b'')
         self.__rows_to_indices = {self.__row(b''): 0}
+        self.__row_cache = {}
         assert not self.__mismatched(b'')
 
     @property
@@ -149,13 +150,20 @@ class Shrinker(object):
     def __row(self, string):
         """A row for a string uses our current set of ends to produce a
         signature that distinguishes it from other strings."""
-        return tuple(self.criterion(string + e) for e in self.__ends)
+        try:
+            return self.__row_cache[string]
+        except KeyError:
+            result = tuple(self.criterion(string + e) for e in self.__ends)
+            self.__row_cache[string] = result
+            return result
 
     def __add_end(self, e):
         """Add a new end to the list of experiments. This changes the structure
         of the graph."""
+        assert e not in self.__ends
         self.__ends.append(e)
         self.__transitions = {}
+        self.__row_cache = {}
 
     def __index_for_row(self, row):
         """Find the index that corresponds to this row, or raise KeyError if we
