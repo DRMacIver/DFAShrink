@@ -31,7 +31,6 @@ class Shrinker(object):
         self.__add_end(b'')
         self.__rows_to_indices = {self.__row(b''): 0}
         self.__row_cache = {}
-        assert not self.__mismatched(b'')
 
     @property
     def best(self):
@@ -79,7 +78,7 @@ class Shrinker(object):
         satisfies the current DFA. There may be a better example that satisfies
         self.criterion, but finding it requires more evidence about the
         structure of the language."""
-        if self.best == b'':
+        if self.criterion(b''):
             return
         while self.__shrink_step():
             pass
@@ -88,43 +87,7 @@ class Shrinker(object):
         """Ensure that the current DFA agrees with self.criterion on string.
         Returns True if this results in any change to the structure of the
         graph."""
-        start_count = -1
-        end_count = -1
-        changed = False
-        while self.__mismatched(string):
-            changed = True
-            state = 0
-            history = [0]
-            for c in string:
-                state = self.transition(state, c)
-                history.append(state)
-            assert len(history) == len(string) + 1
-            # i.e. we were right that it was mismatched
-            assert self.accepting(state) != self.criterion(string)
-
-            def f(i):
-                return self.__starts[history[i]] + string[i:]
-            n = len(string)
-            loval = self.criterion(f(0))
-            assert loval != self.criterion(f(n))
-            lo = 0
-            hi = n
-            # Invariant: self.criterion(f(lo)) == self.criterion(f(0))
-            # Invariant: self.criterion(f(hi)) == self.criterion(f(n))
-            while lo + 1 < hi:
-                mid = (lo + hi) // 2
-                if self.criterion(f(mid)) == loval:
-                    lo = mid
-                else:
-                    hi = mid
-            r = string[hi:]
-            assert r not in self.__ends
-            self.__add_end(r)
-            assert len(self.__ends) > end_count
-            end_count = len(self.__ends)
-            assert len(self.__starts) > start_count
-            start_count = len(self.__starts)
-        return changed
+        return self.__dynamic_check(lambda: string)
 
     def criterion(self, string):
         """A 'smart' version of the criterion passed in. It is cached and will
@@ -147,6 +110,59 @@ class Shrinker(object):
         return "Shrinker(__starts=%r, __ends=%r)" % (
             self.__starts, self.__ends)
 
+    def __check_step(self, string):
+        """Do some work towards making the DFA consistent on string. If there
+        is more work to do, return True. Else, return False."""
+
+        if not string:
+            return False
+
+        history = [0]
+
+        def f(i):
+            while i >= len(history):
+                history.append(
+                    self.transition(history[-1], string[len(history) - 1])
+                )
+            return self.__starts[history[i]] + string[i:]
+        n = len(string)
+        lo = 0
+        hi = 1
+        loval = self.criterion(f(0))
+        while self.criterion(f(hi)) == loval:
+            lo = hi
+            hi *= 2
+            if hi >= n:
+                if self.criterion(f(n)) == loval:
+                    return False
+                hi = n
+                break
+        # Invariant: self.criterion(f(lo)) == self.criterion(f(0))
+        # Invariant: self.criterion(f(hi)) == self.criterion(f(n))
+        while lo + 1 < hi:
+            mid = (lo + hi) // 2
+            if self.criterion(f(mid)) == loval:
+                lo = mid
+            else:
+                hi = mid
+        r = string[hi:]
+        assert r not in self.__ends
+        self.__add_end(r)
+        return True
+
+    def __dynamic_check(self, f):
+        """Adjust the DFA until the current DFA agrees with criterion on f()"""
+        start_count = -1
+        end_count = -1
+        changed = False
+        while self.__check_step(f()):
+            changed = True
+            assert len(self.__ends) > end_count
+            end_count = len(self.__ends)
+            assert len(self.__starts) > start_count
+            start_count = len(self.__starts)
+        return changed
+
     def __row(self, string):
         """A row for a string uses our current set of ends to produce a
         signature that distinguishes it from other strings."""
@@ -166,6 +182,12 @@ class Shrinker(object):
         self.__row_cache = {}
 
     def __index_for_row(self, row):
+        assert len(row) == len(self.__ends)
+        i = self.__index_for_row_no_check(row)
+        assert self.__row(self.__starts[i]) == row
+        return i
+
+    def __index_for_row_no_check(self, row):
         """Find the index that corresponds to this row, or raise KeyError if we
         do not currently have a state for this row."""
         try:
@@ -213,31 +235,10 @@ class Shrinker(object):
 
     def __shrink_step(self):
         """Do some shrinking. Return True if more shrinking is required."""
-        transitions = {}
-        state = 0
-        current_best = self.__best
-        for b in current_best:
-            transitions[state] = b
-            state = self.transition(state, b)
-            if self.accepting(state):
-                break
-        rebuilt = bytearray()
-        state = 0
-        while True:
-            if self.accepting(state):
-                break
-            try:
-                b = transitions[state]
-            except KeyError:
-                break
-            state = self.transition(state, b)
-            rebuilt.append(b)
-            assert sort_key(bytes(rebuilt)) <= sort_key(current_best)
-        rebuilt = bytes(rebuilt)
-        if rebuilt != current_best:
-            if not self.check(rebuilt):
-                assert self.__best != current_best
-            return True
+
+        # Ensure there is a zero cost path to a best example.
+        self.__dynamic_check(lambda: self.best)
+
         initial = self.__best
 
         # Cost, length of route, route, last state
@@ -274,19 +275,11 @@ class Shrinker(object):
             return False
         return self.__best != initial
 
-    def __mismatched(self, string):
-        """Does the DFA agree with criterion on this string?"""
-        state = 0
-        for c in string:
-            state = self.transition(state, c)
-        return self.accepting(state) != self.criterion(string)
-
 
 def shrink(initial, criterion, *, shrink_callback=None):
     """Attempt to find a minimal version of initial that satisfies criterion"""
     shrinker = Shrinker(criterion, shrink_callback=shrink_callback)
     if not shrinker.criterion(initial):
         raise ValueError("Initial example does not satisfy criterion")
-    shrinker.check(initial)
     shrinker.shrink()
     return shrinker.best
