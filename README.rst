@@ -20,16 +20,37 @@ The core idea of this shrinker is this:
 So we can use a process of regular language induction (attempting to fit a DFA
 to an unknown regular language) to try to shrink the example.
 
+Language inference algorithm
+----------------------------
+
 The algorithm we use is based on Rivest and Schapire's "`Inference of Finite
 Automata Using Homing Sequences <http://rob.schapire.net/papers/homing.pdf>`_",
 in which they present an improvement to
 Dana Angluin's L* search from "`Learning Regular Sets From Queries and
 Counterexamples <http://www.cs.berkeley.edu/~dawnsong/teaching/s10/papers/angluin87.pdf>`_"
-but with one important difference: We don't make any attempt to
-build the whole DFA, but instead allow it to be constructed lazily, potentially
-building a new state whenever we try a previously unseen transition. This
-avoids doing a potentially large amount of work by only focusing on the areas
-of the graph that we actually need to explore.
+but with important differences:
+
+The big difference is that we don't make any attempt to build the whole DFA,
+but instead allow it to be constructed lazily, potentially building a new state
+whenever we try a previously unseen transition. This avoids doing a potentially
+large amount of work by only focusing on the areas of the graph that we
+actually need to explore to perform shrinks.
+
+The remaining differences are mostly useful optimizations:
+
+The binary search is modified to use an exponential probe to find a
+good starting point close to the beginning of the string. This helps avoid
+doing O(n^2) work unless we really have to (it's still O(n^2) worst case, but
+the worst case is reasonably avoidable).
+
+We automatically track the best example we've seen so far and only try to make
+*that* consistent. If we have an inconsistent counterexample then while we try
+to make it consistent this can result in improving the current best example. If
+so we abandon trying to make the previous example consistent and just focus on
+the new one.
+
+Shrinking using the DFA
+-----------------------
 
 Using this DFA we can try various operations which if our DFA is correct will
 shrink the current best example.
@@ -60,14 +81,15 @@ Results
 The test suite has some partial results demonstrating that the concept at least
 works.
 
-It does not currently work on larger examples. I have attempted to recreate
-the shrinking example in Regehr's `Reducers are fuzzers <http://blog.regehr.org/archives/1284>`_
+It does not currently work *very* well on larger examples. I have attempted to
+recreate the shrinking example in Regehr's `Reducers are fuzzers <http://blog.regehr.org/archives/1284>`_
 (for no particularly good reason other than that it was an interesting large
-example) and it never got anywhere meaningful. The reason for this is that
-currently the check() operation which makes the DFA consistent with an example
-is O(n^2) in the size of the example, and the current implementation makes use
-of check() on the initial example. I believe this to be fixable but have not
-yet got the details worked out.
+example). At the time of this writiing I haven't run it long enough to tell what
+the end results look like, but the initial run suggests that it's trying to
+reduce too little at a time - all the successful shrinks are only shaving off a
+handful of bytes. This may change as the run goes on, as it's currently
+primarily shrinking by accident in the course of building the initial check - it
+hasn't actually got as far as the main shrink loop.
 
 As such this is currently more suitable for a final stage of reduction which
 you run after e.g. a more conventional `delta debugging <https://www.st.cs.uni-saarland.de/papers/tse2002/tse2002.pdf>`_
