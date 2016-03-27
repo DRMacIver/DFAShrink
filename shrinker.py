@@ -10,6 +10,12 @@ def sort_key(s):
     return (len(s), s)
 
 
+def cache_key(s):
+    if len(s) < 20:
+        return s
+    return hashlib.sha1(s).digest()
+
+
 class Shrinker(object):
     """A Shrinker maintains a DFA that corresponds to its idea of the language
     of things that match the criterion with which it is provided.
@@ -52,11 +58,13 @@ class Shrinker(object):
 
     def transition(self, state, byte):
         """Returns the state reached by reading byte while in this state."""
-        table = self.__transitions.setdefault(state, {})
         try:
-            return table[byte]
+            table = self.__transitions[state]
         except KeyError:
-            pass
+            table = [None] * 256
+            self.__transitions[state] = table
+        if table[byte] is not None:
+            return table[byte]
         nextstring = self.__starts[state] + bytes([byte])
         try:
             nextstate = self.__strings_to_indices[nextstring]
@@ -93,8 +101,9 @@ class Shrinker(object):
         """A 'smart' version of the criterion passed in. It is cached and will
         automatically update the current best example if a better one is found.
         """
+        key = cache_key(string)
         try:
-            return self.__cache[string]
+            return self.__cache[key]
         except KeyError:
             pass
         result = bool(self.__criterion(string))
@@ -103,7 +112,7 @@ class Shrinker(object):
         ):
             self.__best = string
             self.__shrink_callback(string)
-        self.__cache[string] = result
+        self.__cache[key] = result
         return result
 
     def __repr__(self):
@@ -157,20 +166,21 @@ class Shrinker(object):
         changed = False
         while self.__check_step(f()):
             changed = True
-            assert len(self.__ends) > end_count
+            assert len(self.__ends) > end_count or (
+                len(self.__starts) > start_count)
             end_count = len(self.__ends)
-            assert len(self.__starts) > start_count
             start_count = len(self.__starts)
         return changed
 
     def __row(self, string):
         """A row for a string uses our current set of ends to produce a
         signature that distinguishes it from other strings."""
+        key = cache_key(string)
         try:
-            return self.__row_cache[string]
+            return self.__row_cache[key]
         except KeyError:
             result = tuple(self.criterion(string + e) for e in self.__ends)
-            self.__row_cache[string] = result
+            self.__row_cache[key] = result
             return result
 
     def __add_end(self, e):
