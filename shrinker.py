@@ -155,7 +155,19 @@ class Shrinker(object):
             else:
                 hi = mid
         r = string[hi:]
-        assert r not in self.__ends
+        prefix = self.__starts[history[lo]] + ALPHABET[string[lo]]
+        altprefix = self.__starts[history[hi]]
+        assert prefix != altprefix
+        assert self.__row(prefix) == self.__row(altprefix)
+        assert self.criterion(prefix + r) != self.criterion(altprefix + r)
+        initial = len(r)
+        probe = len(r) - hi
+        while probe > 0:
+            attempt = hi + probe
+            probe //= 2
+            r2 = string[attempt:]
+            if self.criterion(prefix + r2) != self.criterion(altprefix + r2):
+                r = r2
         self.__add_end(r)
         return True
 
