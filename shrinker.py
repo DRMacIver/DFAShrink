@@ -16,6 +16,8 @@ def cache_key(s):
         return s
     return hashlib.sha1(s).digest()
 
+TOMBSTONE = object()
+
 
 class Shrinker(object):
     """A Shrinker maintains a DFA that corresponds to its idea of the language
@@ -36,8 +38,6 @@ class Shrinker(object):
         self.__strings_to_indices = {}
         self.__shrink_callback = shrink_callback or (lambda s: None)
         self.__add_end(b'')
-        self.__rows_to_indices = {self.__row(b''): 0}
-        self.__row_cache = {}
 
     @property
     def best(self):
@@ -70,15 +70,12 @@ class Shrinker(object):
         try:
             nextstate = self.__strings_to_indices[nextstring]
         except KeyError:
-            row = self.__row(nextstring)
             try:
-                nextstate = self.__index_for_row(row)
+                nextstate = self.__find_equivalent_state(nextstring)
             except KeyError:
                 nextstate = len(self.__starts)
                 self.__starts.append(nextstring)
                 self.__strings_to_indices[nextstring] = nextstate
-                self.__rows_to_indices[row] = nextstate
-            assert self.__row(self.__starts[nextstate]) == row
         table[byte] = nextstate
         return nextstate
 
@@ -122,7 +119,6 @@ class Shrinker(object):
 
     def __route_to_best(self):
         while not self.__have_row(self.best):
-            print(self)
             self.__route_step()
             # Do a little bit of work building states in the direction of
             # this target. The first one finds an experiment that increases
@@ -131,7 +127,7 @@ class Shrinker(object):
 
     def __have_row(self, string):
         try:
-            self.__index_for_row(self.__row(string))
+            self.__find_equivalent_state(string)
             return True
         except KeyError:
             return False
@@ -160,12 +156,10 @@ class Shrinker(object):
                     hi = mid
             assert lo + 1 == hi
             byte = target[lo]
-            curstate = self.__index_for_row(self.__row(target[:lo]))
+            curstate = self.__find_equivalent_state(target[:lo])
             nextstate = self.transition(curstate, byte)
             equivstring = self.__starts[nextstate]
-            presentrow = self.__row(equivstring)
-            targetrow = self.__row(target[:hi])
-            if presentrow == targetrow:
+            if self.__are_strings_equivalent(equivstring, target[:hi]):
                 # We have successfully routed to a previously unseen row.
                 # This extends the reachable subset of the string. Start again
                 # from here.
@@ -228,7 +222,7 @@ class Shrinker(object):
         prefix = self.__starts[history[lo]] + ALPHABET[string[lo]]
         altprefix = self.__starts[history[hi]]
         assert prefix != altprefix
-        assert self.__row(prefix) == self.__row(altprefix)
+        assert self.__are_strings_equivalent(prefix, altprefix)
         assert self.criterion(prefix + r) != self.criterion(altprefix + r)
         probe = len(r) - hi
         while probe > 0:
@@ -253,16 +247,40 @@ class Shrinker(object):
             start_count = len(self.__starts)
         return changed
 
-    def __row(self, string):
-        """A row for a string uses our current set of ends to produce a
-        signature that distinguishes it from other strings."""
+    def __are_strings_equivalent(self, s1, s2):
+        if s1 == s2:
+            return True
+        for e in self.__ends:
+            if self.criterion(s1 + e) != self.criterion(s2 + e):
+                return False
+        return True
+
+    def __is_equivalent_to_state(self, state, string):
+        return self.__are_strings_equivalent(self.__starts[state], string)
+
+    def __find_equivalent_state(self, string):
+        try:
+            return self.__strings_to_indices[string]
+        except KeyError:
+            pass
+        result = None
         key = cache_key(string)
         try:
-            return self.__row_cache[key]
+            result = self.__state_cache[key]
         except KeyError:
-            result = tuple(self.criterion(string + e) for e in self.__ends)
-            self.__row_cache[key] = result
-            return result
+            pass
+        if result is None:
+            result = TOMBSTONE
+            assert isinstance(string, bytes)
+            states = list(self.states())
+            for s in states:
+                if self.__is_equivalent_to_state(s, string):
+                    result = s
+                    break
+        self.__state_cache[key] = result
+        if result is TOMBSTONE:
+            raise KeyError()
+        return result
 
     def __add_end(self, e):
         """Add a new end to the list of experiments. This changes the structure
@@ -270,40 +288,7 @@ class Shrinker(object):
         assert e not in self.__ends
         self.__ends.append(e)
         self.__transitions = {}
-        self.__row_cache = {}
-
-    def __index_for_row(self, row):
-        assert len(row) == len(self.__ends)
-        i = self.__index_for_row_no_check(row)
-        assert self.__row(self.__starts[i]) == row
-        return i
-
-    def __index_for_row_no_check(self, row):
-        """Find the index that corresponds to this row, or raise KeyError if we
-        do not currently have a state for this row."""
-        try:
-            return self.__rows_to_indices[row]
-        except KeyError:
-            pass
-        # We might have added ends since the last time we looked for this row.
-        # Rather than doing an expensive rebuild every time we add an end we
-        # instead "repair" the table by looking for prefixes of this row and
-        # adding them back in to the table. All states will have had a presence
-        # in the table before, and we only add extensions, so if there is a
-        # state that corresponds to this row then it must be present in the
-        # table as a prefix.
-        for i in range(len(row) - 1, 0, -1):
-            trunc = row[:i]
-            if trunc in self.__rows_to_indices:
-                s = self.__rows_to_indices.pop(trunc)
-                self.__rows_to_indices[self.__row(self.__starts[s])] = s
-                try:
-                    # We must look the row up again. s might not be it! If we
-                    # don't find it, continue on to other prefixes.
-                    return self.__rows_to_indices[row]
-                except KeyError:
-                    pass
-        raise KeyError()
+        self.__state_cache = {}
 
     def __transition_costs(self, state):
         """Return a cost value for each transition out of state. The cost is
