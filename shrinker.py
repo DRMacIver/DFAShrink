@@ -116,16 +116,85 @@ class Shrinker(object):
         return result
 
     def __repr__(self):
-        return "Shrinker(__starts=%r, __ends=%r)" % (
-            self.__starts, self.__ends)
+        return "Shrinker(%d states, %d experiments)" % (
+            len(self.__starts), len(self.__ends))
+
+    def __route_to_best(self):
+        while not self.__have_row(self.best):
+            print(self)
+            self.__route_step()
+            # Do a little bit of work building states in the direction of
+            # this target. The first one finds an experiment that increases
+            # the number of states, the second one actually increases the
+            # number of states.
+
+    def __have_row(self, string):
+        try:
+            self.__index_for_row(self.__row(string))
+            return True
+        except KeyError:
+            return False
+
+    def __probe_for_start(self, lo, target):
+        assert not self.__have_row(target)
+        n = lo + 1
+        while self.__have_row(target[:n]):
+            n *= 2
+            if n >= len(target):
+                n = len(target)
+        return n
+
+    def __route_step(self):
+        target = self.best
+        n = len(target)
+        lo = 0
+        # Invariants: have_row(target[:lo]), not have_row(target[:hi])
+        while lo < n:
+            hi = self.__probe_for_start(0, target)
+            while lo + 1 < hi:
+                mid = (lo + hi) // 2
+                if self.__have_row(target[:mid]):
+                    lo = mid
+                else:
+                    hi = mid
+            assert lo + 1 == hi
+            byte = target[lo]
+            curstate = self.__index_for_row(self.__row(target[:lo]))
+            nextstate = self.transition(curstate, byte)
+            equivstring = self.__starts[nextstate]
+            presentrow = self.__row(equivstring)
+            targetrow = self.__row(target[:hi])
+            if presentrow == targetrow:
+                # We have successfully routed to a previously unseen row.
+                # This extends the reachable subset of the string. Start again
+                # from here.
+                if self.__have_row(target):
+                    return
+                lo = hi
+                hi = self.__probe_for_start(lo, target)
+            else:
+                # There is a mismatch between the structure of our graph and
+                # reality witnessed here. Adding a new experiment will fix it.
+                # We must then start again from the beginning.
+                targetstring = target[:hi]
+                assert targetstring not in self.__strings_to_indices
+                distinguishers = {
+                    e for e in self.__ends
+                    if self.criterion(targetstring + e) != self.criterion(
+                        equivstring + e
+                    )
+                }
+                assert distinguishers
+                best_distinguisher = min(distinguishers, key=sort_key)
+                new_experiment = ALPHABET[byte] + best_distinguisher
+                self.__add_end(new_experiment)
+                return
 
     def __check_step(self, string):
         """Do some work towards making the DFA consistent on string. If there
         is more work to do, return True. Else, return False."""
-
         if not string:
             return False
-
         history = [0]
 
         def f(i):
@@ -255,11 +324,14 @@ class Shrinker(object):
                 costs.append(c)
         return costs
 
+    def states(self):
+        return range(len(self.__starts))
+
     def __shrink_step(self):
         """Do some shrinking. Return True if more shrinking is required."""
 
         # Ensure there is a zero cost path to a best example.
-        self.__dynamic_check(lambda: self.best)
+        self.__route_to_best()
 
         initial = self.__best
 
@@ -293,9 +365,9 @@ class Shrinker(object):
                 ))
         if self.check(self.__best):
             return True
-        if not any(self.__best):
-            return False
-        return self.__best != initial
+        if self.__best != initial:
+            return True
+        return self.__dynamic_check(lambda: self.best)
 
 
 def shrink(initial, criterion, *, shrink_callback=None):
