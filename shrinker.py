@@ -1,4 +1,5 @@
 import heapq
+import hashlib
 
 
 BYTES = range(256)
@@ -229,7 +230,6 @@ class Shrinker(object):
         assert prefix != altprefix
         assert self.__row(prefix) == self.__row(altprefix)
         assert self.criterion(prefix + r) != self.criterion(altprefix + r)
-        initial = len(r)
         probe = len(r) - hi
         while probe > 0:
             attempt = hi + probe
