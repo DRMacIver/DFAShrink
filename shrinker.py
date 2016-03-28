@@ -117,14 +117,6 @@ class Shrinker(object):
         return "Shrinker(%d states, %d experiments)" % (
             len(self.__starts), len(self.__ends))
 
-    def __route_to_best(self):
-        while not self.__have_row(self.best):
-            self.__route_step()
-            # Do a little bit of work building states in the direction of
-            # this target. The first one finds an experiment that increases
-            # the number of states, the second one actually increases the
-            # number of states.
-
     def __have_row(self, string):
         try:
             self.__find_equivalent_state(string)
@@ -140,50 +132,6 @@ class Shrinker(object):
             if n >= len(target):
                 n = len(target)
         return n
-
-    def __route_step(self):
-        target = self.best
-        n = len(target)
-        lo = 0
-        # Invariants: have_row(target[:lo]), not have_row(target[:hi])
-        while lo < n:
-            hi = self.__probe_for_start(0, target)
-            while lo + 1 < hi:
-                mid = (lo + hi) // 2
-                if self.__have_row(target[:mid]):
-                    lo = mid
-                else:
-                    hi = mid
-            assert lo + 1 == hi
-            byte = target[lo]
-            curstate = self.__find_equivalent_state(target[:lo])
-            nextstate = self.transition(curstate, byte)
-            equivstring = self.__starts[nextstate]
-            if self.__are_strings_equivalent(equivstring, target[:hi]):
-                # We have successfully routed to a previously unseen row.
-                # This extends the reachable subset of the string. Start again
-                # from here.
-                if self.__have_row(target):
-                    return
-                lo = hi
-                hi = self.__probe_for_start(lo, target)
-            else:
-                # There is a mismatch between the structure of our graph and
-                # reality witnessed here. Adding a new experiment will fix it.
-                # We must then start again from the beginning.
-                targetstring = target[:hi]
-                assert targetstring not in self.__strings_to_indices
-                distinguishers = {
-                    e for e in self.__ends
-                    if self.criterion(targetstring + e) != self.criterion(
-                        equivstring + e
-                    )
-                }
-                assert distinguishers
-                best_distinguisher = min(distinguishers, key=sort_key)
-                new_experiment = ALPHABET[byte] + best_distinguisher
-                self.__add_end(new_experiment)
-                return
 
     def __check_step(self, string):
         """Do some work towards making the DFA consistent on string. If there
@@ -316,7 +264,7 @@ class Shrinker(object):
         """Do some shrinking. Return True if more shrinking is required."""
 
         # Ensure there is a zero cost path to a best example.
-        self.__route_to_best()
+        self.__dynamic_check(lambda: self.best)
 
         initial = self.__best
 
