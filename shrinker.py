@@ -1,5 +1,6 @@
 import heapq
 import hashlib
+from random import Random
 
 
 BYTES = range(256)
@@ -26,74 +27,24 @@ class Shrinker(object):
     The goal of this is to produce a string which is minimal length and
     lexicographically minimal amongst strings of minimal length."""
 
-    def __init__(self, criterion, *, shrink_callback=None):
+    def __init__(self, initial, criterion, *, shrink_callback=None):
         """Initialise with criterion. shrink_callback will be called with an
         example every time one that is strictly better than the previous best
         is found."""
-        self.__best = None
         self.__criterion = criterion
         self.__starts = [b'']
-        self.__ends = []
+        self.__experiments = [None]
+        self.__live = [True]
         self.__cache = {}
+        self.__transitions = {}
         self.__strings_to_indices = {}
         self.__shrink_callback = shrink_callback or (lambda s: None)
-        self.__add_end(b'')
-
-    @property
-    def best(self):
-        """The best example positive we've seen so far. Raises ValueError if
-        no examples found."""
-        if self.__best is None:
-            raise ValueError("No positive examples seen yet")
-        return self.__best
-
-    @property
-    def start(self):
-        """The initial state of the current state machine"""
-        return 0
-
-    def accepting(self, state):
-        """Is this state an accepting one. i.e. do all strings lead to here
-        satisfy criterion if we're right about the shape of the language."""
-        return self.criterion(self.__starts[state])
-
-    def transition(self, state, byte):
-        """Returns the state reached by reading byte while in this state."""
-        try:
-            table = self.__transitions[state]
-        except KeyError:
-            table = [None] * 256
-            self.__transitions[state] = table
-        if table[byte] is not None:
-            return table[byte]
-        nextstring = self.__starts[state] + bytes([byte])
-        try:
-            nextstate = self.__strings_to_indices[nextstring]
-        except KeyError:
-            try:
-                nextstate = self.__find_equivalent_state(nextstring)
-            except KeyError:
-                nextstate = len(self.__starts)
-                self.__starts.append(nextstring)
-                self.__strings_to_indices[nextstring] = nextstate
-        table[byte] = nextstate
-        return nextstate
-
-    def shrink(self):
-        """Improve self.best to the point where it is the best example that
-        satisfies the current DFA. There may be a better example that satisfies
-        self.criterion, but finding it requires more evidence about the
-        structure of the language."""
-        if self.criterion(b''):
-            return
-        while self.__shrink_step():
-            pass
-
-    def check(self, string):
-        """Ensure that the current DFA agrees with self.criterion on string.
-        Returns True if this results in any change to the structure of the
-        graph."""
-        return self.__dynamic_check(lambda: string)
+        self.__random = Random()
+        self.__changes = 0
+        self.__best = None
+        if not self.criterion(initial):
+            raise ValueError("Initial example does not satisfy criterion")
+        assert self.__best == initial
 
     def criterion(self, string):
         """A 'smart' version of the criterion passed in. It is cached and will
@@ -105,208 +56,237 @@ class Shrinker(object):
         except KeyError:
             pass
         result = bool(self.__criterion(string))
-        if result and (
-            self.__best is None or sort_key(string) < sort_key(self.__best)
-        ):
-            self.__best = string
-            self.__shrink_callback(string)
+        if result:
+            for i, s in enumerate(self.__starts):
+                if not s:
+                    continue
+                if string.startswith(s):
+                    suffix = string[len(s):]
+                    if self.__live[i]:
+                        if sort_key(suffix) < sort_key(self.__experiments[i]):
+                            self.__experiments[i] = suffix
+                    else:
+                        self.__live[i] = True
+                        self.__changes += 1
+                        self.__experiments[i] = suffix
+            if (
+                self.__best is None or sort_key(string) < sort_key(self.__best)
+            ):
+                self.__best = string
+                self.__shrink_callback(string)
+                self.__changes += 1
         self.__cache[key] = result
         return result
 
-    def __repr__(self):
-        return "Shrinker(%d states, %d experiments)" % (
-            len(self.__starts), len(self.__ends))
+    @property
+    def best(self):
+        """The best example positive we've seen so far."""
+        return self.__best
 
-    def __have_row(self, string):
-        try:
-            self.__find_equivalent_state(string)
-            return True
-        except KeyError:
-            return False
-
-    def __probe_for_start(self, lo, target):
-        assert not self.__have_row(target)
-        n = lo + 1
-        while self.__have_row(target[:n]):
-            n *= 2
-            if n >= len(target):
-                n = len(target)
-        return n
-
-    def __check_step(self, string):
-        """Do some work towards making the DFA consistent on string. If there
-        is more work to do, return True. Else, return False."""
-        if not string:
-            return False
-        history = [0]
-
-        def f(i):
-            while i >= len(history):
-                history.append(
-                    self.transition(history[-1], string[len(history) - 1])
-                )
-            return self.__starts[history[i]] + string[i:]
-        n = len(string)
-        lo = 0
-        hi = 1
-        loval = self.criterion(f(0))
-        while self.criterion(f(hi)) == loval:
-            lo = hi
-            hi *= 2
-            if hi >= n:
-                if self.criterion(f(n)) == loval:
-                    return False
-                hi = n
-                break
-        # Invariant: self.criterion(f(lo)) == self.criterion(f(0))
-        # Invariant: self.criterion(f(hi)) == self.criterion(f(n))
-        while lo + 1 < hi:
-            mid = (lo + hi) // 2
-            if self.criterion(f(mid)) == loval:
-                lo = mid
-            else:
-                hi = mid
-        r = string[hi:]
-        prefix = self.__starts[history[lo]] + ALPHABET[string[lo]]
-        altprefix = self.__starts[history[hi]]
-        assert prefix != altprefix
-        assert self.__are_strings_equivalent(prefix, altprefix)
-        assert self.criterion(prefix + r) != self.criterion(altprefix + r)
-        probe = len(r) - hi
-        while probe > 0:
-            attempt = hi + probe
-            probe //= 2
-            r2 = string[attempt:]
-            if self.criterion(prefix + r2) != self.criterion(altprefix + r2):
-                r = r2
-        self.__add_end(r)
-        return True
-
-    def __dynamic_check(self, f):
-        """Adjust the DFA until the current DFA agrees with criterion on f()"""
-        start_count = -1
-        end_count = -1
-        changed = False
-        while self.__check_step(f()):
-            changed = True
-            assert len(self.__ends) > end_count or (
-                len(self.__starts) > start_count)
-            end_count = len(self.__ends)
-            start_count = len(self.__starts)
-        return changed
-
-    def __are_strings_equivalent(self, s1, s2):
-        if s1 == s2:
-            return True
-        for e in self.__ends:
-            if self.criterion(s1 + e) != self.criterion(s2 + e):
-                return False
-        return True
-
-    def __is_equivalent_to_state(self, state, string):
-        return self.__are_strings_equivalent(self.__starts[state], string)
-
-    def __find_equivalent_state(self, string):
-        try:
-            return self.__strings_to_indices[string]
-        except KeyError:
-            pass
-        result = None
-        key = cache_key(string)
-        try:
-            result = self.__state_cache[key]
-        except KeyError:
-            pass
-        if result is None:
-            result = TOMBSTONE
-            assert isinstance(string, bytes)
-            states = list(self.states())
-            for s in states:
-                if self.__is_equivalent_to_state(s, string):
-                    result = s
-                    break
-        self.__state_cache[key] = result
-        if result is TOMBSTONE:
-            raise KeyError()
-        return result
-
-    def __add_end(self, e):
-        """Add a new end to the list of experiments. This changes the structure
-        of the graph."""
-        assert e not in self.__ends
-        self.__ends.append(e)
-        self.__transitions = {}
-        self.__state_cache = {}
-
-    def __transition_costs(self, state):
-        """Return a cost value for each transition out of state. The cost is
-        the number of uncached criterion calls that would be required to figure
-        out that transition."""
-        costs = []
-        base = self.__starts[state]
-        for a in ALPHABET:
-            s = base + a
-            if s in self.__strings_to_indices:
-                costs.append(0)
-            else:
-                string = self.__starts[state]
-                c = 0
-                for e in self.__ends:
-                    if string + e not in self.__cache:
-                        c += 1
-                costs.append(c)
-        return costs
+    @property
+    def start(self):
+        """The initial state of the current state machine"""
+        return 0
 
     def states(self):
         return range(len(self.__starts))
 
-    def __shrink_step(self):
-        """Do some shrinking. Return True if more shrinking is required."""
+    def accepting(self, state):
+        """Is this state an accepting one. i.e. do all strings lead to here
+        satisfy criterion if we're right about the shape of the language."""
+        return self.criterion(self.__starts[state])
 
-        # Ensure there is a zero cost path to a best example.
-        self.__dynamic_check(lambda: self.best)
-
-        initial = self.__best
-
-        # Cost, length of route, route, last state
-        queue = [(0, 0, b'', 0)]
-        best_route = {}
-        while queue:
-            _, _, route, state = heapq.heappop(queue)
-            if sort_key(route) >= sort_key(self.__best):
-                continue
-            if route:
-                state = self.transition(state, route[-1])
-            if (
-                state in best_route and
-                sort_key(route) >= sort_key(best_route[state])
-            ):
-                continue
-            best_route[state] = route
-            if self.accepting(state):
-                # We've found a short route, but it doesn't actually work when
-                # we try it against our criterion. The shape of the graph now
-                # changes and we start again from scratch
-                if self.check(route):
-                    return True
-            costs = self.__transition_costs(state)
-            for b in BYTES:
-                cost = costs[b]
-                newroute = route + ALPHABET[b]
-                heapq.heappush(queue, (
-                    cost, len(newroute), newroute, state
+    def forbid(self, source, byte, target):
+        complete, forbidden = self.__transition_value(source, byte)
+        if complete:
+            if target == forbidden:
+                raise ValueError("Cannot forbid canonical transition" % (
+                    source, byte, target
                 ))
-        if self.check(self.__best):
+            else:
+                return
+        if target not in forbidden:
+            self.__changes += 1
+            forbidden.add(target)
+
+    def transitions(self, state, byte):
+        """Returns the state reached by reading byte while in this state."""
+        complete, forbidden_or_state = self.__transition_value(state, byte)
+        if complete:
+            assert isinstance(forbidden_or_state, int)
+            return [forbidden_or_state]
+        assert isinstance(forbidden_or_state, set)
+        non_forbidden = [
+            s for s in self.states() if s not in forbidden_or_state
+        ]
+        if non_forbidden:
+            return non_forbidden
+        s = self.__starts[state] + ALPHABET[byte]
+        self.__starts.append(s)
+        i = len(self.__starts) - 1
+        self.__strings_to_indices[s] = i
+        self.__transitions[state][byte] = (True, i)
+        # Dummy values during criterion calculation
+        self.__live.append(False)
+        self.__experiments.append(b'')
+        # run criterion for the side effects
+        for e in (b'', self.__experiment(state)[1:]):
+            self.__experiments[i] = e
+            if self.criterion(s + e):
+                self.__live[i] = True
+                break
+        assert len(self.__experiments) == len(self.__starts)
+        assert len(self.__live) == len(self.__starts)
+        return [i]
+
+    def shrink(self):
+        changes = -1
+        while self.__changes > changes:
+            changes = self.__changes
+            best_routes = {}
+            queue = []
+            # Heap format: Presumed dead, Uncertainty, length of path, path,
+            # state history
+            heapq.heappush(queue, (
+                (0, b'', (0,))
+            ))
+            while queue:
+                _, path, history = heapq.heappop(queue)
+                assert len(path) + 1 == len(history)
+                state = history[-1]
+                if not self.__live[state]:
+                    continue
+                # We already have a better route to this path (this can happen
+                # because of prioritizing more certain routes. It can't happen
+                # in normal Dijkstra's algorithm). That makes this path not
+                # interesting.
+                if (
+                    state in best_routes and
+                    sort_key(best_routes[state][0]) <= sort_key(path)
+                ):
+                    continue
+                # We're only interested in routes that improve on our current
+                # best, so if the path is already >= our current best it can't
+                # do that and we return early.
+                if sort_key(path) >= sort_key(self.best):
+                    continue
+                # We now need to check if this was a valid transition. We don't
+                # do this earlier in the hopes that the above checks can save
+                # us the work
+                if len(history) > 1:
+                    prevstate = history[-2]
+                    if not self.__double_check(
+                        prevstate, path[-1], state
+                    ):
+                        continue
+                best_routes[state] = (path, history)
+                for b, a in enumerate(ALPHABET):
+                    newpath = path + a
+                    transitions = self.transitions(state, b)
+                    for t in transitions:
+                        heapq.heappush(queue, (
+                            len(newpath), newpath,
+                            history + (t,)
+                        ))
+            # We now have a set of putative best paths to each state that we
+            # know about. It's time to find out if they actually work.
+            for state, (path, history) in best_routes.items():
+                assert len(history) == len(path) + 1
+                if not path:
+                    continue
+                last_state = history[-1]
+                altpath = self.__starts[last_state]
+                if path == altpath:
+                    continue
+                experiment = self.__experiment(last_state)
+                if (
+                    self.criterion(path + experiment) !=
+                    self.criterion(altpath + experiment)
+                ):
+                    # This path is wrong. Lets diagnose why and forbid a
+                    # transition that lead to it.
+                    lo = 0
+                    hi = len(history) - 1
+                    while lo + 1 < hi:
+                        mid = (lo + hi) // 2
+                        prefix = path[:mid - 1]
+                        state = history[mid]
+                        altprefix = self.__starts[state]
+                        experiment = self.__experiment(state)
+                        if (
+                            self.criterion(prefix + experiment) ==
+                            self.criterion(altprefix + experiment)
+                        ):
+                            lo = mid
+                        else:
+                            hi = mid
+                    # The transition we made when we were in state history[lo]
+                    # was bad.
+                    self.forbid(history[lo], path[lo], history[hi])
+
+            # We've now got a pretty good guess about how to navigate around
+            # the states that we known about, but we don't know much about how
+            # to escape them. Try to expand our horizons.
+            # We do this by looking for states that we know lead to an
+            # accepting state but where our current graph does not evidence
+            # that.
+            any_changes = False
+            for s in reversed(self.states()):
+                if not self.__live[s]:
+                    continue
+                if self.accepting(s):
+                    continue
+                ex = self.__experiment(s)
+                c = ex[0]
+                suffix = ex[1:]
+                for t in self.transitions(s, c):
+                    if not self.criterion(self.__starts[t] + suffix):
+                        self.forbid(s, c, t)
+                        any_changes = True
+                if not any_changes:
+                    for c in range(256):
+                        self.__double_check(s, c, self.transitions(s, c)[0])
+                if any_changes:
+                    break
+        assert any(self.accepting(s) for s in self.states())
+
+    def __experiment(self, state):
+        if state == 0:
+            return self.best
+        return self.__experiments[state]
+
+    def __double_check(self, source, byte, target):
+        confirmed, value = self.__transition_value(source, byte)
+        if confirmed:
+            return target == value
+        else:
+            if target in value:
+                return False
+            s = self.__starts[source]
+            t = self.__starts[target]
+            extended = s + ALPHABET[byte]
+            for e in (b'', self.__experiment(target)):
+                if self.criterion(extended + e) != self.criterion(
+                    t + e
+                ):
+                    self.forbid(source, byte, target)
+                    return False
             return True
-        if self.__best != initial:
-            return True
-        return self.__dynamic_check(lambda: self.best)
+
+    def __transition_value(self, source, byte):
+        return self.__transitions.setdefault(
+            source, {}).setdefault(byte, (False, set()))
+
+    def __is_complete(self, source, byte):
+        return self.__transition_value(source, byte)[0]
+
+    def __repr__(self):
+        return "Shrinker(%d states (%d live), %d bytes in best)" % (
+            len(self.__starts), sum(self.__live), len(self.best))
 
 
 def shrink(initial, criterion, *, shrink_callback=None):
     """Attempt to find a minimal version of initial that satisfies criterion"""
-    shrinker = Shrinker(criterion, shrink_callback=shrink_callback)
-    if not shrinker.criterion(initial):
-        raise ValueError("Initial example does not satisfy criterion")
+    shrinker = Shrinker(initial, criterion, shrink_callback=shrink_callback)
     shrinker.shrink()
     return shrinker.best
